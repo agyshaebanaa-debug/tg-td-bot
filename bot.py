@@ -244,6 +244,8 @@ class AdminMapAdd(StatesGroup):
     wave_builder = State()
     waiting_mob_count = State()
     waiting_wave_turns = State()
+    waiting_reward_coins = State()
+    waiting_reward_gems = State()
 
 class AdminRarityAdd(StatesGroup):
     waiting_for_name = State()
@@ -283,6 +285,12 @@ class AdminSettingsEdit(StatesGroup):
     waiting_for_turn_time_skip = State()
     waiting_for_turn_time_noskip = State()
 
+class AdminCurAdd(StatesGroup):
+    name = State()
+
+class AdminManage(StatesGroup):
+    add_id = State()
+
 # ==========================================
 # UI КЛАВИАТУРЫ
 # ==========================================
@@ -317,7 +325,8 @@ def get_admin_panel_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="💸 Выдать Валюту (Любому) 💸", callback_data="admin_give_cur")],
         [InlineKeyboardButton(text="✨ Доб. Редкость", callback_data="admin_add_rarity"), InlineKeyboardButton(text="✨ Удал. Редкость", callback_data="admin_del_rarity")],
         [InlineKeyboardButton(text="👨‍💻 Назначить Админа", callback_data="admin_add"), InlineKeyboardButton(text="🚫 Снять Админа", callback_data="admin_remove")],
-        [InlineKeyboardButton(text="⚙️ Настройки", callback_data="admin_settings")]
+        [InlineKeyboardButton(text="⚙️ Настройки", callback_data="admin_settings")],
+        [InlineKeyboardButton(text="💾 Бэкап / Восстановление БД", callback_data="admin_backup_db")]
     ])
 
 def get_unit_types_kb(selected: list) -> InlineKeyboardMarkup:
@@ -771,6 +780,16 @@ async def cq_main_index(callback: CallbackQuery, state: FSMContext):
 # ==========================================
 # СОЗДАНИЕ КАТОК (ЛОББИ)
 # ==========================================
+def get_lobby_text(bid: str) -> str:
+    battle = active_battles[bid]
+    m_data = maps_db[battle["map_id"]]
+    text = f"⚔️ <b>Лобби создано!</b>\nКарта: {m_data.get('name')}\n"
+    text += f"\n👥 <b>Игроки ({len(battle['players'])}/4):</b>\n"
+    for uid, p in battle["players"].items():
+        text += f"• {p['name']}\n"
+    text += "\nИгроки могут нажать «Присоединиться», а хост — «Начать»."
+    return text
+
 @dp.callback_query(StateFilter('*'), F.data == "battle_select_map")
 async def lobby_select_map(callback: CallbackQuery):
     if not maps_db: return await callback.answer("Нет доступных карт!", show_alert=True)
@@ -814,7 +833,7 @@ async def lobby_create(callback: CallbackQuery):
     try: await callback.message.delete()
     except: pass
     
-    msg = await callback.message.answer(f"⚔️ <b>Лобби создано!</b>\nКарта: {m_data.get('name')}\nХост: {callback.from_user.first_name}\n\nИгроки могут нажать «Присоединиться», а хост — «Начать».", reply_markup=kb)
+    msg = await callback.message.answer(get_lobby_text(bid), reply_markup=kb)
     active_battles[bid]["main_msg_id"] = msg.message_id
     await callback.answer()
 
@@ -833,6 +852,10 @@ async def lobby_join(callback: CallbackQuery):
     m_data = maps_db[battle["map_id"]]
     battle["players"][user_id_str] = {"name": callback.from_user.first_name, "coins": m_data.get("starting_coins", 100), "deployed": []}
     user_to_battle[user_id_str] = bid
+    
+    try: await callback.message.edit_text(get_lobby_text(bid), reply_markup=callback.message.reply_markup)
+    except: pass
+
     await callback.answer("Вы успешно присоединились!")
 
 @dp.callback_query(StateFilter('*'), F.data.startswith("lobby_start_"))
@@ -888,6 +911,22 @@ async def battle_loop(battle_id: str, bot: Bot):
         delay = bot_settings["turn_time_skip"] if battle["auto_skip"] else bot_settings["turn_time_noskip"]
         await asyncio.sleep(delay)
         await process_battle_turn(battle_id, bot)
+
+async def update_main_battle_message(battle_id: str, bot: Bot):
+    if battle_id not in active_battles: return
+    battle = active_battles[battle_id]
+    photo_file, text, main_kb = await render_battle_ui(battle_id, bot)
+    chat_id = battle["chat_id"]
+    try:
+        if photo_file:
+            try: await bot.edit_message_media(chat_id=chat_id, message_id=battle["main_msg_id"], media=InputMediaPhoto(media=photo_file, caption=text[:1024], parse_mode="HTML"), reply_markup=main_kb)
+            except: pass
+        else:
+            try: await bot.edit_message_caption(chat_id=chat_id, message_id=battle["main_msg_id"], caption=text[:1024], reply_markup=main_kb, parse_mode="HTML")
+            except:
+                try: await bot.edit_message_text(chat_id=chat_id, message_id=battle["main_msg_id"], text=text[:4096], reply_markup=main_kb, parse_mode="HTML")
+                except: pass
+    except TelegramBadRequest: pass
 
 async def process_battle_turn(battle_id: str, bot: Bot):
     if battle_id not in active_battles: return
@@ -1006,17 +1045,7 @@ async def process_battle_turn(battle_id: str, bot: Bot):
                 for _ in range(m_entry.get("count", 1)):
                     battle["mobs"].append({"id": m_entry["id"], "name": mob.get("name", "Моб"), "hp": mob["hp"], "max_hp": mob["hp"], "def": mob.get("defense_percent", 0)})
 
-    photo_file, text, main_kb = await render_battle_ui(battle_id, bot)
-    try:
-        if photo_file:
-            try: await bot.edit_message_media(chat_id=chat_id, message_id=battle["main_msg_id"], media=InputMediaPhoto(media=photo_file, caption=text[:1024], parse_mode="HTML"), reply_markup=main_kb)
-            except: pass
-        else:
-            try: await bot.edit_message_caption(chat_id=chat_id, message_id=battle["main_msg_id"], caption=text[:1024], reply_markup=main_kb, parse_mode="HTML")
-            except: 
-                try: await bot.edit_message_text(chat_id=chat_id, message_id=battle["main_msg_id"], text=text[:4096], reply_markup=main_kb, parse_mode="HTML")
-                except: pass
-    except TelegramBadRequest: pass 
+    await update_main_battle_message(battle_id, bot)
 
 async def finish_battle(battle_id: str, bot: Bot, is_win: bool):
     battle = active_battles[battle_id]
@@ -1079,6 +1108,9 @@ async def battle_deploy(callback: CallbackQuery):
     
     try: await callback.message.edit_reply_markup(reply_markup=get_player_kb(battle_id, user_id_str))
     except: pass
+    
+    await update_main_battle_message(battle_id, callback.bot)
+    
     await callback.answer(f"Юнит размещен! (-{cost} монет)")
 
 @dp.callback_query(StateFilter('*'), F.data.startswith("b_toggle_"))
@@ -1464,6 +1496,20 @@ async def mapb_wave_turns(m: Message, state: FSMContext):
 
 @dp.callback_query(AdminMapAdd.wave_builder, F.data == "mapb_finish")
 async def mapb_finish(cb: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminMapAdd.waiting_reward_coins)
+    await cb.message.edit_text("💰 Введите награду за победу (Количество Монет):")
+    await cb.answer()
+
+@dp.message(AdminMapAdd.waiting_reward_coins)
+async def map_reward_coins(m: Message, state: FSMContext):
+    if not m.text.isdigit(): return await m.answer("Введите число.")
+    await state.update_data(reward_coins=int(m.text))
+    await state.set_state(AdminMapAdd.waiting_reward_gems)
+    await m.answer("💎 Введите награду за победу (Количество Гемов):")
+
+@dp.message(AdminMapAdd.waiting_reward_gems)
+async def map_reward_gems(m: Message, state: FSMContext):
+    if not m.text.isdigit(): return await m.answer("Введите число.")
     data = await state.get_data()
     global map_id_counter
     mid = str(map_id_counter)
@@ -1473,13 +1519,12 @@ async def mapb_finish(cb: CallbackQuery, state: FSMContext):
         "starting_coins": 100,
         "waves_total": len(data["waves"]),
         "waves": data["waves"],
-        "rewards": {"💰 Монеты": 100}
+        "rewards": {"💰 Монеты": data["reward_coins"], "💎 Гемы": int(m.text)}
     }
     map_id_counter += 1
     save_data()
     await state.clear()
-    await send_main_screen(cb.message, f"✅ Карта «{data['name']}» добавлена!")
-    await cb.answer()
+    await send_main_screen(m, f"✅ Карта «{data['name']}» добавлена!")
 
 # --- ДОБАВЛЕНИЕ КРЕЙТА ---
 @dp.callback_query(StateFilter('*'), F.data == "admin_add_crate")
@@ -1618,6 +1663,134 @@ async def admin_give_cur_step4(m: Message, state: FSMContext):
     await state.clear()
     await m.answer(f"✅ Баланс игрока <code>{target_id}</code> обновлен!\nИзменение: <b>{amt} {cur_name}</b>\n\n{notify_status}")
     await send_main_screen(m)
+
+# --- НОВЫЕ ФУНКЦИИ АДМИНКИ ---
+@dp.callback_query(StateFilter('*'), F.data == "admin_add_cur")
+async def a_add_cur(cb: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminCurAdd.name)
+    await cb.message.edit_text("🪙 Введите название новой валюты (например '💎 Алмазы'):")
+
+@dp.message(AdminCurAdd.name)
+async def a_add_cur_name(m: Message, state: FSMContext):
+    currencies_db.append(m.text.strip())
+    save_data()
+    await state.clear()
+    await send_main_screen(m, f"✅ Валюта {m.text} добавлена!")
+
+@dp.callback_query(StateFilter('*'), F.data == "admin_del_cur")
+async def a_del_cur(cb: CallbackQuery):
+    kb = [[InlineKeyboardButton(text=f"❌ {c}", callback_data=f"delcur_{idx}")] for idx, c in enumerate(currencies_db)]
+    kb.append([InlineKeyboardButton(text="🔙 Отмена", callback_data="admin_panel")])
+    await cb.message.edit_text("Выберите валюту для удаления:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+@dp.callback_query(StateFilter('*'), F.data.startswith("delcur_"))
+async def a_del_cur_act(cb: CallbackQuery):
+    idx = int(cb.data.split("_")[1])
+    if 0 <= idx < len(currencies_db):
+        c = currencies_db.pop(idx)
+        save_data()
+        await cb.answer(f"Удалено: {c}", show_alert=True)
+    await cq_admin_panel(cb, None)
+
+@dp.callback_query(StateFilter('*'), F.data == "admin_add")
+async def a_add_adm(cb: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminManage.add_id)
+    await cb.message.edit_text("👨‍💻 Введите ID пользователя для назначения админом:")
+
+@dp.message(AdminManage.add_id)
+async def a_add_adm_do(m: Message, state: FSMContext):
+    uid = extract_user_identifier(m)
+    if uid:
+        admins_db.add(uid)
+        save_data()
+        await m.answer(f"✅ Пользователь {uid} стал админом.")
+    await state.clear()
+    await send_main_screen(m)
+
+@dp.callback_query(StateFilter('*'), F.data == "admin_remove")
+async def a_rem_adm(cb: CallbackQuery):
+    kb = [[InlineKeyboardButton(text=f"❌ {a}", callback_data=f"deladm_{a}")] for a in admins_db if a != MAIN_ADMIN_ID]
+    kb.append([InlineKeyboardButton(text="🔙 Отмена", callback_data="admin_panel")])
+    await cb.message.edit_text("🚫 Выберите админа для снятия (Главного снять нельзя):", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+@dp.callback_query(StateFilter('*'), F.data.startswith("deladm_"))
+async def a_rem_adm_act(cb: CallbackQuery):
+    uid = cb.data.split("_")[1]
+    if uid in admins_db and uid != MAIN_ADMIN_ID:
+        admins_db.remove(uid)
+        save_data()
+        await cb.answer(f"Админ снят: {uid}", show_alert=True)
+    await cq_admin_panel(cb, None)
+
+def get_settings_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"🪙 Монет за урон: {bot_settings.get('coins_per_damage', 0.5)}", callback_data="aset_cpd")],
+        [InlineKeyboardButton(text=f"⏩ Время хода (скип): {bot_settings.get('turn_time_skip', 5)}с", callback_data="aset_tts")],
+        [InlineKeyboardButton(text=f"⏱ Время хода (обыч.): {bot_settings.get('turn_time_noskip', 10)}с", callback_data="aset_ttns")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")]
+    ])
+
+@dp.callback_query(StateFilter('*'), F.data == "admin_settings")
+async def a_settings(cb: CallbackQuery):
+    await cb.message.edit_text("⚙️ <b>Настройки Бота</b>\nНажмите на параметр для изменения:", reply_markup=get_settings_kb())
+
+@dp.callback_query(StateFilter('*'), F.data.startswith("aset_"))
+async def a_set_edit(cb: CallbackQuery, state: FSMContext):
+    action = cb.data
+    if action == "aset_cpd":
+        await state.set_state(AdminSettingsEdit.waiting_for_coins_per_damage)
+        await cb.message.edit_text("🪙 Введите количество монет за 1 ед. урона (например 0.5):")
+    elif action == "aset_tts":
+        await state.set_state(AdminSettingsEdit.waiting_for_turn_time_skip)
+        await cb.message.edit_text("⏩ Введите длительность хода при авто-скипе (в секундах):")
+    elif action == "aset_ttns":
+        await state.set_state(AdminSettingsEdit.waiting_for_turn_time_noskip)
+        await cb.message.edit_text("⏱ Введите длительность хода БЕЗ авто-скипа (в секундах):")
+    await cb.answer()
+
+@dp.message(AdminSettingsEdit.waiting_for_coins_per_damage)
+async def a_set_cpd_do(m: Message, state: FSMContext):
+    try: bot_settings["coins_per_damage"] = float(m.text.replace(",", "."))
+    except: return await m.answer("⚠️ Введите число (например 0.5).")
+    save_data()
+    await state.clear()
+    await send_main_screen(m, "✅ Настройка (Монеты за урон) сохранена.")
+
+@dp.message(AdminSettingsEdit.waiting_for_turn_time_skip)
+async def a_set_tts_do(m: Message, state: FSMContext):
+    if not m.text.isdigit(): return await m.answer("⚠️ Введите целое число.")
+    bot_settings["turn_time_skip"] = int(m.text)
+    save_data()
+    await state.clear()
+    await send_main_screen(m, "✅ Настройка (Время хода при авто-скипе) сохранена.")
+
+@dp.message(AdminSettingsEdit.waiting_for_turn_time_noskip)
+async def a_set_ttns_do(m: Message, state: FSMContext):
+    if not m.text.isdigit(): return await m.answer("⚠️ Введите целое число.")
+    bot_settings["turn_time_noskip"] = int(m.text)
+    save_data()
+    await state.clear()
+    await send_main_screen(m, "✅ Настройка (Время хода без скипа) сохранена.")
+
+@dp.callback_query(StateFilter('*'), F.data == "admin_backup_db")
+async def admin_backup(cb: CallbackQuery):
+    data = db_get("full_state", {})
+    file = BufferedInputFile(json.dumps(data, indent=2, ensure_ascii=False).encode('utf-8'), filename="game_data_backup.json")
+    await cb.message.answer_document(file, caption="📂 <b>Вот полный бэкап базы данных.</b>\n\nЧтобы восстановить её, отправьте этот файл боту и в подписи (caption) укажите команду <code>/restore_db</code>")
+    await cb.answer()
+
+@dp.message(StateFilter('*'), F.document, F.caption == "/restore_db")
+async def admin_restore(m: Message):
+    if str(m.from_user.id) not in admins_db: return
+    bio = io.BytesIO()
+    await m.bot.download(m.document, destination=bio)
+    try:
+        data = json.loads(bio.getvalue().decode('utf-8'))
+        db_set("full_state", data)
+        load_data()
+        await m.answer("✅ База данных успешно восстановлена! Все настройки, пользователи и коллекции загружены из бэкапа.")
+    except Exception as e:
+        await m.answer(f"❌ Ошибка восстановления: {e}")
 
 # ==========================================
 # УНИВЕРСАЛЬНЫЙ ПЕРЕХВАТЧИК
