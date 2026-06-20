@@ -211,7 +211,7 @@ class PanelMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         if isinstance(event, CallbackQuery) and event.message:
             if event.message.chat.type in {"group", "supergroup"}:
-                public_cb = ["lobby_", "b_dep_", "b_toggle_", "b_surr_", "free_crate"]
+                public_cb = ["lobby_", "b_dep_", "b_toggle_", "b_surr_", "free_crate", "main_menu", "battle_select_map", "main_index", "main_inventory", "crates_list", "buy_crate_"]
                 if not any(event.data.startswith(p) for p in public_cb):
                     key = f"{event.message.chat.id}_{event.message.message_id}"
                     if key in panel_owners and panel_owners[key] != event.from_user.id:
@@ -233,6 +233,12 @@ class AdminUnitAdd(StatesGroup):
 class AdminMobAdd(StatesGroup):
     photo, name, hp, defense_percent = State(), State(), State(), State()
 
+class AdminAddRarity(StatesGroup): name = State()
+class AdminAddAdmin(StatesGroup): user_id = State()
+class AdminAddCur(StatesGroup): name = State()
+class AdminAddCrate(StatesGroup): name = State(), cost_cur = State(), cost_amt = State()
+class AdminSettingsState(StatesGroup): select = State(), value = State()
+
 # ==========================================
 # UI КЛАВИАТУРЫ
 # ==========================================
@@ -252,10 +258,30 @@ def get_main_menu_kb(chat_type: str = "private") -> InlineKeyboardMarkup:
 
 def get_admin_panel_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Редкость", callback_data="admin_add_rarity"), InlineKeyboardButton(text="➖ Редкость", callback_data="admin_del_rarity")],
+        [InlineKeyboardButton(text="➕ Админ", callback_data="admin_add_admin"), InlineKeyboardButton(text="➖ Админ", callback_data="admin_del_admin")],
+        [InlineKeyboardButton(text="➕ Валюта", callback_data="admin_add_cur"), InlineKeyboardButton(text="➖ Валюта", callback_data="admin_del_cur")],
+        [InlineKeyboardButton(text="➕ Крейт", callback_data="admin_add_crate"), InlineKeyboardButton(text="➖ Крейт", callback_data="admin_del_crate")],
+        [InlineKeyboardButton(text="➕ Карта", callback_data="admin_add_map"), InlineKeyboardButton(text="➖ Карта", callback_data="admin_del_map")],
+        [InlineKeyboardButton(text="➕ Моб", callback_data="admin_add_mob"), InlineKeyboardButton(text="➖ Моб", callback_data="admin_del_mob")],
         [InlineKeyboardButton(text="➕ Юнит", callback_data="admin_add_unit"), InlineKeyboardButton(text="➖ Юнит", callback_data="admin_del_unit")],
-        [InlineKeyboardButton(text="👾 Доб. Моба", callback_data="admin_add_mob"), InlineKeyboardButton(text="🗺 Доб. Карту", callback_data="admin_add_map")],
-        [InlineKeyboardButton(text="💸 Выдать Валюту (Любому) 💸", callback_data="admin_give_cur")]
+        [InlineKeyboardButton(text="⚙️ Настройки Игры", callback_data="admin_settings")],
+        [InlineKeyboardButton(text="💸 Выдать Валюту", callback_data="admin_give_cur")],
+        [InlineKeyboardButton(text="🔙 Закрыть", callback_data="main_menu")]
     ])
+
+def get_delete_kb(items, prefix: str) -> InlineKeyboardMarkup:
+    kb = []
+    if isinstance(items, dict):
+        for k, v in items.items():
+            name = v.get("name", k) if isinstance(v, dict) else k
+            kb.append([InlineKeyboardButton(text=f"❌ {name}", callback_data=f"{prefix}_{k}")])
+    else:
+        for item in items:
+            if item != MAIN_ADMIN_ID: # Защита от удаления главного админа
+                kb.append([InlineKeyboardButton(text=f"❌ {item}", callback_data=f"{prefix}_{item}")])
+    kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_unit_types_kb(selected: list) -> InlineKeyboardMarkup:
     kb = [[InlineKeyboardButton(text=f"{'✅' if t in selected else '❌'} {t}", callback_data=f"toggleutype_{t}")] for t in ATTACK_TYPES]
@@ -595,6 +621,77 @@ async def cq_free_crate(callback: CallbackQuery):
     save_data()
     await callback.answer("🎁 Вы получили 100 💰 Монет!", show_alert=True)
 
+@dp.callback_query(F.data == "main_menu")
+async def cq_main_menu(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    try: await callback.message.delete()
+    except: pass
+    await send_main_screen(callback.message, "🏠 <i>Главное меню</i>")
+
+@dp.callback_query(F.data == "main_index")
+async def cq_main_index(callback: CallbackQuery):
+    if not units_db: return await callback.answer("Энциклопедия пуста!", show_alert=True)
+    text = "📖 <b>Энциклопедия Юнитов:</b>\n\n"
+    for uid, u in units_db.items():
+        text += f"🔸 <b>{u.get('name')}</b> [{u.get('rarity', 'Обычная')}]\n"
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")]])
+    await callback.message.edit_text(text[:4000], reply_markup=kb)
+
+@dp.callback_query(F.data == "main_inventory")
+async def cq_main_inventory(callback: CallbackQuery):
+    uid = str(callback.from_user.id)
+    inv = user_inventory.get(uid, set())
+    if not inv: return await callback.answer("Ваш инвентарь пуст!", show_alert=True)
+    text = "🎒 <b>Ваш Инвентарь:</b>\n(Экипировка доступна через профиль или в бою)\n\n"
+    for item in inv:
+        unit_id, is_shiny = item.split(":")
+        u = units_db.get(unit_id)
+        if u:
+            shiny_txt = "✨ Шайни" if is_shiny == "1" else ""
+            text += f"▪️ {u.get('name')} {shiny_txt}\n"
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")]])
+    await callback.message.edit_text(text[:4000], reply_markup=kb)
+
+@dp.callback_query(F.data == "crates_list")
+async def cq_crates_list(callback: CallbackQuery):
+    if not crates_db: return await callback.answer("Магазин крейтов пуст!", show_alert=True)
+    text = "📦 <b>Магазин Крейтов:</b>\n\n"
+    kb = []
+    for cid, c in crates_db.items():
+        text += f"🔹 {c['name']} - {c['cost_amt']} {c['cost_cur']}\n"
+        kb.append([InlineKeyboardButton(text=f"Купить {c['name']}", callback_data=f"buy_crate_{cid}")])
+    kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")])
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+@dp.callback_query(F.data.startswith("buy_crate_"))
+async def cq_buy_crate(callback: CallbackQuery):
+    cid = callback.data.split("_")[2]
+    c = crates_db.get(cid)
+    if not c: return await callback.answer("Крейт не найден!", show_alert=True)
+    
+    uid = str(callback.from_user.id)
+    init_user_balance(uid)
+    
+    if user_balances[uid].get(c['cost_cur'], 0) < c['cost_amt']:
+        return await callback.answer(f"Не хватает {c['cost_cur']}!", show_alert=True)
+        
+    user_balances[uid][c['cost_cur']] -= c['cost_amt']
+    
+    if units_db:
+        win_unit_id = random.choice(list(units_db.keys()))
+        is_shiny = 1 if random.random() < 0.1 else 0
+        
+        if uid not in user_inventory: user_inventory[uid] = set()
+        user_inventory[uid].add(f"{win_unit_id}:{is_shiny}")
+        
+        u_name = units_db[win_unit_id]['name']
+        msg = f"🎉 Вы открыли {c['name']} и получили:\n<b>{u_name}</b> {'✨ (ШАЙНИ)' if is_shiny else ''}!"
+    else:
+        msg = f"🎉 Вы открыли {c['name']}, но юнитов в игре пока нет."
+        
+    save_data()
+    await callback.answer(msg, show_alert=True)
+
 # --- НОВАЯ СИСТЕМА ЛОББИ ---
 @dp.callback_query(F.data == "battle_select_map")
 async def cq_battle_select_map(callback: CallbackQuery):
@@ -749,12 +846,287 @@ async def cq_admin_panel(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.edit_text("👑 <b>ПАНЕЛЬ АДМИНА</b>", reply_markup=get_admin_panel_kb())
 
+# --- НАСТРОЙКИ ИГРЫ ---
+@dp.callback_query(F.data == "admin_settings")
+async def cq_admin_settings(callback: CallbackQuery, state: FSMContext):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏱ КД хода (Скип)", callback_data="aset_turn_time_skip"), InlineKeyboardButton(text="⏱ КД хода (Без скипа)", callback_data="aset_turn_time_noskip")],
+        [InlineKeyboardButton(text="💰 Монеты за 1 Урона", callback_data="aset_coins_per_damage")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")]
+    ])
+    text = f"⚙️ <b>Настройки Игры:</b>\nКД Скип: {bot_settings['turn_time_skip']}с\nКД Без Скипа: {bot_settings['turn_time_noskip']}с\nМонет/урон: {bot_settings['coins_per_damage']}"
+    await callback.message.edit_text(text, reply_markup=kb)
+
+@dp.callback_query(F.data.startswith("aset_"))
+async def cq_aset_val(callback: CallbackQuery, state: FSMContext):
+    setting_key = callback.data.replace("aset_", "")
+    await state.set_state(AdminSettingsState.value)
+    await state.update_data(select=setting_key)
+    await callback.message.answer(f"Введите новое числовое значение для <b>{setting_key}</b>:")
+
+@dp.message(AdminSettingsState.value)
+async def aset_save(message: Message, state: FSMContext):
+    data = await state.get_data()
+    try: val = float(message.text.replace(",", "."))
+    except: return await message.answer("Введите число!")
+    bot_settings[data["select"]] = val
+    save_data()
+    await state.clear()
+    await message.answer("✅ Настройка сохранена!")
+
+# --- РЕДКОСТИ ---
+@dp.callback_query(F.data == "admin_add_rarity")
+async def cq_add_rarity(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminAddRarity.name)
+    await callback.message.answer("Введите название новой редкости:")
+
+@dp.message(AdminAddRarity.name)
+async def a_add_rarity_save(message: Message, state: FSMContext):
+    rarities_db.append(message.text)
+    save_data()
+    await state.clear()
+    await message.answer("✅ Редкость добавлена!")
+
+@dp.callback_query(F.data == "admin_del_rarity")
+async def cq_del_rarity(callback: CallbackQuery):
+    await callback.message.edit_text("Удалить редкость:", reply_markup=get_delete_kb(rarities_db, "delrar"))
+
+@dp.callback_query(F.data.startswith("delrar_"))
+async def cq_delrar_exec(callback: CallbackQuery):
+    r = callback.data.split("_")[1]
+    if r in rarities_db: rarities_db.remove(r)
+    save_data()
+    await callback.answer("Удалено!")
+    await callback.message.edit_reply_markup(reply_markup=get_delete_kb(rarities_db, "delrar"))
+
+# --- АДМИНЫ ---
+@dp.callback_query(F.data == "admin_add_admin")
+async def cq_add_admin(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminAddAdmin.user_id)
+    await callback.message.answer("Введите Telegram ID нового админа:")
+
+@dp.message(AdminAddAdmin.user_id)
+async def a_add_admin_save(message: Message, state: FSMContext):
+    admins_db.add(message.text.strip())
+    save_data()
+    await state.clear()
+    await message.answer("✅ Админ добавлен!")
+
+@dp.callback_query(F.data == "admin_del_admin")
+async def cq_del_admin(callback: CallbackQuery):
+    await callback.message.edit_text("Удалить админа:", reply_markup=get_delete_kb(list(admins_db), "deladm"))
+
+@dp.callback_query(F.data.startswith("deladm_"))
+async def cq_deladm_exec(callback: CallbackQuery):
+    a = callback.data.split("_")[1]
+    if a in admins_db and a != MAIN_ADMIN_ID: admins_db.remove(a)
+    save_data()
+    await callback.answer("Удалено!")
+    await callback.message.edit_reply_markup(reply_markup=get_delete_kb(list(admins_db), "deladm"))
+
+# --- ВАЛЮТЫ ---
+@dp.callback_query(F.data == "admin_add_cur")
+async def cq_add_cur(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminAddCur.name)
+    await callback.message.answer("Введите название валюты (желательно со смайликом):")
+
+@dp.message(AdminAddCur.name)
+async def a_add_cur_save(message: Message, state: FSMContext):
+    currencies_db.append(message.text)
+    save_data()
+    await state.clear()
+    await message.answer("✅ Валюта добавлена!")
+
+@dp.callback_query(F.data == "admin_del_cur")
+async def cq_del_cur(callback: CallbackQuery):
+    await callback.message.edit_text("Удалить валюту:", reply_markup=get_delete_kb(currencies_db, "delcur"))
+
+@dp.callback_query(F.data.startswith("delcur_"))
+async def cq_delcur_exec(callback: CallbackQuery):
+    c = callback.data.split("_")[1]
+    if c in currencies_db: currencies_db.remove(c)
+    save_data()
+    await callback.answer("Удалено!")
+    await callback.message.edit_reply_markup(reply_markup=get_delete_kb(currencies_db, "delcur"))
+
+# --- КРЕЙТЫ ---
+@dp.callback_query(F.data == "admin_add_crate")
+async def cq_add_crate(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminAddCrate.name)
+    await callback.message.answer("Введите название крейта:")
+
+@dp.message(AdminAddCrate.name)
+async def a_crate_name(message: Message, state: FSMContext):
+    await state.update_data(name=message.text)
+    await state.set_state(AdminAddCrate.cost_cur)
+    kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=c)] for c in currencies_db], resize_keyboard=True)
+    await message.answer("Выберите валюту для покупки:", reply_markup=kb)
+
+@dp.message(AdminAddCrate.cost_cur)
+async def a_crate_cur(message: Message, state: FSMContext):
+    await state.update_data(cost_cur=message.text)
+    await state.set_state(AdminAddCrate.cost_amt)
+    await message.answer("Введите стоимость (число):", reply_markup=reply_bottom_menu)
+
+@dp.message(AdminAddCrate.cost_amt)
+async def a_crate_amt(message: Message, state: FSMContext):
+    data = await state.get_data()
+    global crate_id_counter
+    crates_db[str(crate_id_counter)] = {"name": data["name"], "cost_cur": data["cost_cur"], "cost_amt": int(message.text)}
+    crate_id_counter += 1
+    save_data()
+    await state.clear()
+    await message.answer("✅ Крейт добавлен!")
+
+@dp.callback_query(F.data == "admin_del_crate")
+async def cq_del_crate(callback: CallbackQuery):
+    await callback.message.edit_text("Удалить крейт:", reply_markup=get_delete_kb(crates_db, "delcra"))
+
+@dp.callback_query(F.data.startswith("delcra_"))
+async def cq_delcra_exec(callback: CallbackQuery):
+    c = callback.data.split("_")[1]
+    if c in crates_db: del crates_db[c]
+    save_data()
+    await callback.answer("Удалено!")
+    await callback.message.edit_reply_markup(reply_markup=get_delete_kb(crates_db, "delcra"))
+
+# --- ВЫДАЧА ВАЛЮТЫ ---
+@dp.callback_query(F.data == "admin_give_cur")
+async def cq_admin_give(callback: CallbackQuery, state: FSMContext):
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=c, callback_data=f"givecur_{c}")] for c in currencies_db])
+    await callback.message.edit_text("Выберите валюту:", reply_markup=kb)
+
+@dp.callback_query(F.data.startswith("givecur_"))
+async def cq_givecur_sel(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminGiveCur.target_id)
+    await state.update_data(select_cur=callback.data.split("_")[1])
+    await callback.message.answer("Введите ID пользователя (число):")
+
+@dp.message(AdminGiveCur.target_id)
+async def a_give_tid(message: Message, state: FSMContext):
+    await state.update_data(target_id=message.text.strip())
+    await state.set_state(AdminGiveCur.amount)
+    await message.answer("Введите количество:")
+
+@dp.message(AdminGiveCur.amount)
+async def a_give_amt(message: Message, state: FSMContext):
+    data = await state.get_data()
+    tid = data["target_id"]
+    amt = int(message.text)
+    init_user_balance(tid)
+    user_balances[tid][data["select_cur"]] = user_balances[tid].get(data["select_cur"], 0) + amt
+    save_data()
+    await state.clear()
+    await message.answer(f"✅ Выдано {amt} {data['select_cur']} игроку {tid}")
+
+# --- МОБЫ ---
+@dp.callback_query(F.data == "admin_add_mob")
+async def cq_add_mob(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminMobAdd.photo)
+    await callback.message.answer("📸 Отправьте фото моба:")
+
+@dp.message(AdminMobAdd.photo)
+async def a_mob_photo(message: Message, state: FSMContext):
+    if not message.photo: return await message.answer("Нужно фото!")
+    await state.update_data(photo=message.photo[-1].file_id)
+    await state.set_state(AdminMobAdd.name)
+    await message.answer("📝 Название моба:")
+
+@dp.message(AdminMobAdd.name)
+async def a_mob_name(message: Message, state: FSMContext):
+    await state.update_data(name=message.text)
+    await state.set_state(AdminMobAdd.hp)
+    await message.answer("❤️ ХП моба:")
+
+@dp.message(AdminMobAdd.hp)
+async def a_mob_hp(message: Message, state: FSMContext):
+    await state.update_data(hp=float(message.text))
+    await state.set_state(AdminMobAdd.defense_percent)
+    await message.answer("🛡 % Защиты (от 0 до 100):")
+
+@dp.message(AdminMobAdd.defense_percent)
+async def a_mob_def(message: Message, state: FSMContext):
+    data = await state.get_data()
+    global mob_id_counter
+    mobs_db[str(mob_id_counter)] = {"photo": data["photo"], "name": data["name"], "hp": data["hp"], "defense_percent": float(message.text)}
+    mob_id_counter += 1
+    save_data()
+    await state.clear()
+    await message.answer("✅ Моб добавлен!")
+
+@dp.callback_query(F.data == "admin_del_mob")
+async def cq_del_mob(callback: CallbackQuery):
+    await callback.message.edit_text("Удалить моба:", reply_markup=get_delete_kb(mobs_db, "delmob"))
+
+@dp.callback_query(F.data.startswith("delmob_"))
+async def cq_delmob_exec(callback: CallbackQuery):
+    m = callback.data.split("_")[1]
+    if m in mobs_db: del mobs_db[m]
+    save_data()
+    await callback.answer("Удалено!")
+    await callback.message.edit_reply_markup(reply_markup=get_delete_kb(mobs_db, "delmob"))
+
+# --- КАРТЫ ---
+@dp.callback_query(F.data == "admin_add_map")
+async def cq_m_add(callback: CallbackQuery, state: FSMContext):
+    if not mobs_db: return await callback.answer("Сначала создайте мобов!", show_alert=True)
+    await state.set_state(AdminMapAdd.photo)
+    await callback.message.edit_text("📸 Отправьте фото Карты:")
+
+@dp.message(AdminMapAdd.photo)
+async def m_step_photo(message: Message, state: FSMContext):
+    await state.update_data(photo=message.photo[-1].file_id)
+    await state.set_state(AdminMapAdd.name)
+    await message.answer("📝 Название Карты:")
+
+@dp.message(AdminMapAdd.name)
+async def m_step_name(message: Message, state: FSMContext):
+    await state.update_data(name=message.text)
+    await state.set_state(AdminMapAdd.waves_count)
+    await message.answer("🌊 Количество волн (сгенерируются автоматически):")
+
+@dp.message(AdminMapAdd.waves_count)
+async def m_step_waves(message: Message, state: FSMContext):
+    data = await state.get_data()
+    waves_total = int(message.text)
+    waves = []
+    mob_ids = list(mobs_db.keys())
+    for i in range(waves_total):
+        waves.append({
+            "mob_id": random.choice(mob_ids),
+            "count": 5 + i * 2,
+            "turns": 10 + i
+        })
+    global map_id_counter
+    maps_db[str(map_id_counter)] = {
+        "photo": data["photo"], "name": data["name"],
+        "starting_coins": 200, "waves_total": waves_total,
+        "waves": waves, "rewards": {"💰 Монеты": 100 + waves_total * 10}
+    }
+    map_id_counter += 1
+    save_data()
+    await state.clear()
+    await send_main_screen(message, "✅ Карта успешно сгенерирована!")
+
+@dp.callback_query(F.data == "admin_del_map")
+async def cq_del_map(callback: CallbackQuery):
+    await callback.message.edit_text("Удалить карту:", reply_markup=get_delete_kb(maps_db, "delmap"))
+
+@dp.callback_query(F.data.startswith("delmap_"))
+async def cq_delmap_exec(callback: CallbackQuery):
+    m = callback.data.split("_")[1]
+    if m in maps_db: del maps_db[m]
+    save_data()
+    await callback.answer("Удалено!")
+    await callback.message.edit_reply_markup(reply_markup=get_delete_kb(maps_db, "delmap"))
+
+# --- ЮНИТЫ ---
 @dp.callback_query(F.data == "admin_add_unit")
 async def cq_u_add(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await state.set_state(AdminUnitAdd.unit_types)
     await state.update_data(temp_types=[])
-    await callback.message.edit_text("➕ <b>Создание Юнита</b>\nВыберите классы (вкл. Замедление):", reply_markup=get_unit_types_kb([]))
+    await callback.message.edit_text("➕ <b>Создание Юнита</b>\nВыберите классы:", reply_markup=get_unit_types_kb([]))
 
 @dp.callback_query(AdminUnitAdd.unit_types, F.data.startswith("toggleutype_"))
 async def u_toggle_type(callback: CallbackQuery, state: FSMContext):
@@ -783,8 +1155,15 @@ async def u_step_photo(message: Message, state: FSMContext):
 @dp.message(AdminUnitAdd.name)
 async def u_step_name(message: Message, state: FSMContext):
     await state.update_data(name=message.text.strip())
+    await state.set_state(AdminUnitAdd.rarity)
+    kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=r)] for r in rarities_db], resize_keyboard=True)
+    await message.answer("🌟 Выберите редкость:", reply_markup=kb)
+
+@dp.message(AdminUnitAdd.rarity)
+async def u_step_rarity(message: Message, state: FSMContext):
+    await state.update_data(rarity=message.text)
     await state.set_state(AdminUnitAdd.supply_limit)
-    await message.answer("🛑 Лимит на поле (число):")
+    await message.answer("🛑 Лимит на поле (число):", reply_markup=reply_bottom_menu)
 
 @dp.message(AdminUnitAdd.supply_limit)
 async def u_step_limit(message: Message, state: FSMContext):
@@ -807,10 +1186,10 @@ async def jump_next_unit_stat(message: Message, state: FSMContext):
         return await message.answer("❄️ <b>[Замедление]</b> % замедления (напр. 20):")
     if "Замедление" in types and "slow_duration" not in data:
         await state.set_state(AdminUnitAdd.slow_duration)
-        return await message.answer("❄️ <b>[Замедление]</b> Длительность в секундах (напр. 5):")
+        return await message.answer("❄️ <b>[Замедление]</b> Длительность в сек:")
     if "Замедление" in types and "slow_cooldown" not in data:
         await state.set_state(AdminUnitAdd.slow_cooldown)
-        return await message.answer("❄️ <b>[Замедление]</b> КД способности (напр. 15):")
+        return await message.answer("❄️ <b>[Замедление]</b> КД способности:")
 
     if has_attack and "cd" not in data:
         await state.set_state(AdminUnitAdd.cd)
@@ -832,7 +1211,7 @@ async def jump_next_unit_stat(message: Message, state: FSMContext):
         
     global unit_id_counter
     uid = str(unit_id_counter)
-    u_dict = {"photo": data["photo"], "name": data["name"], "unit_types": types, "supply_limit": data["supply_limit"], "deploy_cost": data["deploy_cost"]}
+    u_dict = {"photo": data["photo"], "name": data["name"], "rarity": data["rarity"], "unit_types": types, "supply_limit": data["supply_limit"], "deploy_cost": data["deploy_cost"]}
     
     if has_attack: u_dict["cd"], u_dict["damage"] = data["cd"], data["damage"]
     if "Саппорт" in types: u_dict["cd_boost"], u_dict["dmg_boost"] = data["cd_boost"], data["dmg_boost"]
@@ -845,7 +1224,6 @@ async def jump_next_unit_stat(message: Message, state: FSMContext):
     await state.clear()
     await send_main_screen(message, f"✅ Юнит создан!")
 
-# Обработчики ввода статов
 @dp.message(StateFilter(AdminUnitAdd.slow_percent, AdminUnitAdd.slow_duration, AdminUnitAdd.slow_cooldown, AdminUnitAdd.cd, AdminUnitAdd.damage, AdminUnitAdd.cd_boost, AdminUnitAdd.dmg_boost, AdminUnitAdd.income))
 async def u_rec_stats(message: Message, state: FSMContext):
     val = float(message.text.replace(",", ".")) if "." in message.text or "," in message.text else int(message.text)
@@ -854,49 +1232,17 @@ async def u_rec_stats(message: Message, state: FSMContext):
     await state.update_data({state_name: val})
     await jump_next_unit_stat(message, state)
 
-# Быстрое создание Карты (Автогенерация волн)
-@dp.callback_query(F.data == "admin_add_map")
-async def cq_m_add(callback: CallbackQuery, state: FSMContext):
-    if not mobs_db: return await callback.answer("Сначала создайте мобов!", show_alert=True)
-    await state.set_state(AdminMapAdd.photo)
-    await callback.message.edit_text("📸 Отправьте фото Карты:")
+@dp.callback_query(F.data == "admin_del_unit")
+async def cq_del_unit(callback: CallbackQuery):
+    await callback.message.edit_text("Удалить юнита:", reply_markup=get_delete_kb(units_db, "delunit"))
 
-@dp.message(AdminMapAdd.photo)
-async def m_step_photo(message: Message, state: FSMContext):
-    await state.update_data(photo=message.photo[-1].file_id)
-    await state.set_state(AdminMapAdd.name)
-    await message.answer("📝 Название Карты:")
-
-@dp.message(AdminMapAdd.name)
-async def m_step_name(message: Message, state: FSMContext):
-    await state.update_data(name=message.text)
-    await state.set_state(AdminMapAdd.waves_count)
-    await message.answer("🌊 Количество волн (сгенерируются автоматически):")
-
-@dp.message(AdminMapAdd.waves_count)
-async def m_step_waves(message: Message, state: FSMContext):
-    data = await state.get_data()
-    waves_total = int(message.text)
-    
-    waves = []
-    mob_ids = list(mobs_db.keys())
-    for i in range(waves_total):
-        waves.append({
-            "mob_id": random.choice(mob_ids),
-            "count": 5 + i * 2,
-            "turns": 10 + i
-        })
-        
-    global map_id_counter
-    maps_db[str(map_id_counter)] = {
-        "photo": data["photo"], "name": data["name"],
-        "starting_coins": 200, "waves_total": waves_total,
-        "waves": waves, "rewards": {"💰 Монеты": 100 + waves_total * 10}
-    }
-    map_id_counter += 1
+@dp.callback_query(F.data.startswith("delunit_"))
+async def cq_delunit_exec(callback: CallbackQuery):
+    u = callback.data.split("_")[1]
+    if u in units_db: del units_db[u]
     save_data()
-    await state.clear()
-    await send_main_screen(message, "✅ Карта успешно сгенерирована!")
+    await callback.answer("Удалено!")
+    await callback.message.edit_reply_markup(reply_markup=get_delete_kb(units_db, "delunit"))
 
 # ==========================================
 # ЗАПУСК БОТА
